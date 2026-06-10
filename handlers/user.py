@@ -486,8 +486,14 @@ async def _handle_qty_up(
 
     product_id, qty_str = parts
     current_qty = int(qty_str)
-    stock = db.get_stock_count(product_id)
-    max_qty = min(stock, 10)
+    # Produk jasa (is_service) tidak dibatasi stok — anggap stok "tak terbatas"
+    # (maks 10 per order), sama seperti kb_product_detail_qty. Tanpa ini, produk
+    # jasa berstok 0 (mis. ghs_do_buyer) membuat max_qty=0 → qty turun ke 0.
+    if db.is_service_product(product_id):
+        effective_stock = 999
+    else:
+        effective_stock = db.get_stock_count(product_id)
+    max_qty = min(effective_stock, 10)
     new_qty = min(current_qty + 1, max_qty)
 
     if new_qty == current_qty:
