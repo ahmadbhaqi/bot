@@ -91,6 +91,23 @@ def build_ghs_source_keyboard(order_id: str) -> InlineKeyboardMarkup:
     )
 
 
+def build_do_buyer_start_keyboard(order_id: str) -> InlineKeyboardMarkup:
+    """Keyboard untuk produk ghs_do_buyer: satu tombol mulai klaim.
+
+    Produk ini SELALU memakai GHS milik buyer, jadi tidak perlu memilih sumber.
+    """
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "🚀 Mulai Klaim DO",
+                    callback_data=f"do_src_buyer_{order_id}",
+                ),
+            ]
+        ]
+    )
+
+
 def build_do_method_keyboard() -> InlineKeyboardMarkup:
     """Keyboard pilihan metode login DigitalOcean (email/cookies)."""
     return InlineKeyboardMarkup(
@@ -129,7 +146,7 @@ async def send_do_claim_prompt(bot, chat_id: int, order_id: str) -> None:
 
     try:
         if is_buyer_product:
-            # ghs_do_buyer: langsung minta GHS buyer, skip pemilihan sumber
+            # ghs_do_buyer: SELALU pakai GHS buyer → satu tombol mulai klaim.
             await bot.send_message(
                 chat_id=chat_id,
                 text=(
@@ -139,11 +156,11 @@ async def send_do_claim_prompt(bot, chat_id: int, order_id: str) -> None:
                     f"Kredit $200 hanya berlaku untuk akun DigitalOcean yang belum pernah "
                     f"mendapat kredit sebelumnya dan sudah memiliki metode pembayaran terdaftar."
                     f"{bulk_note}\n\n"
-                    f"👤 Produk ini menggunakan *GHS milikmu sendiri*.\n"
-                    f"Pilih *sumber akun GHS* yang akan dipakai:"
+                    f"👤 Produk ini menggunakan *GHS (GitHub Education) milikmu sendiri*.\n"
+                    f"Tekan tombol di bawah untuk mulai."
                 ),
                 parse_mode="Markdown",
-                reply_markup=build_ghs_source_keyboard(order_id),
+                reply_markup=build_do_buyer_start_keyboard(order_id),
             )
         else:
             # ghs_do: tampilkan pilihan seller / buyer
@@ -250,6 +267,7 @@ def _clear_do_data(context: ContextTypes.DEFAULT_TYPE) -> None:
         "do_totp",
         "do_cookies",
         "do_accounts_queue",
+        "do_ghs_queue",
         "do_suppress_next_prompt",
     ):
         context.user_data.pop(key, None)
@@ -290,6 +308,8 @@ async def entry_do_claim(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return ConversationHandler.END
 
     total = order.get("quantity", 1) or 1
+    done = order.get("do_claim_index", 0) or 0
+    remaining = max(total - done, 1)
     context.user_data["do_claim_order_id"] = order_id
     context.user_data["do_claim_total"] = total
     context.user_data["do_ghs_source"] = source
@@ -306,25 +326,33 @@ async def entry_do_claim(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         context.user_data["do_ghs_source"] = "buyer"
 
     if source == "seller":
-        # Ambil akun GHS dari stok seller (yang sudah disimpan di order)
+        # Ambil akun GHS dari stok seller (yang sudah disimpan di order).
         accounts = _get_ghs_accounts(order)
         if not accounts:
             await query.answer("Akun GHS belum tersedia. Hubungi admin.", show_alert=True)
             return ConversationHandler.END
 
-        index = order.get("do_claim_index", 0) or 0
-        if index >= len(accounts):
+        if done >= len(accounts):
             await query.answer("Semua klaim DO sudah diproses.", show_alert=True)
             return ConversationHandler.END
 
-        ghs_email, ghs_pass, ghs_totp = _parse_ghs(accounts[index])
-        if not ghs_email or not ghs_pass:
+        # Bangun antrian GHS seller: dari index berjalan sampai akhir, dibatasi
+        # oleh sisa klaim. Tiap GHS akan dipasangkan 1:1 dengan akun DO.
+        ghs_queue: list[tuple[str, str, str]] = []
+        for raw_account in accounts[done : done + remaining]:
+            ghs_email, ghs_pass, ghs_totp = _parse_ghs(raw_account)
+            if ghs_email and ghs_pass:
+                ghs_queue.append((ghs_email, ghs_pass, ghs_totp))
+
+        if not ghs_queue:
             await query.answer("Format akun GHS tidak valid. Hubungi admin.", show_alert=True)
             return ConversationHandler.END
 
-        context.user_data["do_ghs_email"] = ghs_email
-        context.user_data["do_ghs_password"] = ghs_pass
-        context.user_data["do_ghs_totp"] = ghs_totp
+        context.user_data["do_ghs_queue"] = ghs_queue
+        # Set GHS pertama untuk jalur cookies (satu klaim per pesan).
+        context.user_data["do_ghs_email"] = ghs_queue[0][0]
+        context.user_data["do_ghs_password"] = ghs_queue[0][1]
+        context.user_data["do_ghs_totp"] = ghs_queue[0][2]
 
         await update.effective_chat.send_message(
             "🏪 *GHS dari Seller dipilih.*\n\n"
@@ -334,19 +362,33 @@ async def entry_do_claim(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return DO_CHOOSE_METHOD
 
-    # source == "buyer" → minta akun GHS milik buyer
-    await update.effective_chat.send_message(
-        "👤 *GHS dari Buyer dipilih.*\n\n"
-        "Kirim akun *GitHub Education* milikmu yang akan dipakai klaim.\n\n"
-        "Format (pilih salah satu):\n"
-        "`email:password`\n"
-        "`email:password:TOTP_SECRET`\n"
-        "`email | password | TOTP_SECRET`\n\n"
-        "_TOTP secret hanya jika akun GitHub-mu pakai 2FA._\n"
-        "⚠️ Pesan akan dihapus otomatis demi keamanan.\n\n"
-        "Ketik /cancel untuk membatalkan.",
-        parse_mode="Markdown",
-    )
+    # source == "buyer" → minta akun GHS milik buyer (bisa banyak untuk bulk).
+    if remaining > 1:
+        prompt = (
+            f"👤 *GHS dari Buyer dipilih.* (sisa *{remaining}* klaim)\n\n"
+            f"Kirim *{remaining} akun GitHub Education* milikmu, *satu akun per baris*.\n"
+            f"Tiap akun GHS akan dipakai untuk *satu* klaim DO.\n\n"
+            f"Format tiap baris (pilih salah satu):\n"
+            f"`email:password`\n"
+            f"`email:password:TOTP_SECRET`\n"
+            f"`email | password | TOTP_SECRET`\n\n"
+            f"_TOTP secret hanya jika akun GitHub-mu pakai 2FA._\n"
+            f"⚠️ Pesan akan dihapus otomatis demi keamanan.\n\n"
+            f"Ketik /cancel untuk membatalkan."
+        )
+    else:
+        prompt = (
+            "👤 *GHS dari Buyer dipilih.*\n\n"
+            "Kirim akun *GitHub Education* milikmu yang akan dipakai klaim.\n\n"
+            "Format (pilih salah satu):\n"
+            "`email:password`\n"
+            "`email:password:TOTP_SECRET`\n"
+            "`email | password | TOTP_SECRET`\n\n"
+            "_TOTP secret hanya jika akun GitHub-mu pakai 2FA._\n"
+            "⚠️ Pesan akan dihapus otomatis demi keamanan.\n\n"
+            "Ketik /cancel untuk membatalkan."
+        )
+    await update.effective_chat.send_message(prompt, parse_mode="Markdown")
     return DO_WAITING_GHS
 
 
@@ -356,7 +398,8 @@ async def entry_do_claim(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def handle_do_ghs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Terima akun GHS milik buyer, lalu lanjut ke pemilihan metode login DO."""
+    """Terima akun GHS milik buyer (satu atau beberapa untuk bulk),
+    lalu lanjut ke pemilihan metode login DO."""
     msg = update.message
     raw = (msg.text or "").strip()
 
@@ -366,28 +409,55 @@ async def handle_do_ghs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     except Exception:
         pass
 
-    # Parse dengan parser fleksibel (':' atau '|')
-    ghs_email, ghs_pass, ghs_totp = _parse_do_account(raw)
-    if not ghs_email or not ghs_pass:
+    # Parse semua baris akun GHS (mendukung ':' atau '|', satu akun per baris).
+    ghs_accounts = _parse_do_accounts_block(raw)
+    if not ghs_accounts:
         await update.effective_chat.send_message(
             "❌ Format akun GHS tidak valid.\n\n"
-            "Gunakan: `email:password` atau `email:password:TOTP_SECRET`.\n"
+            "Gunakan: `email:password` atau `email:password:TOTP_SECRET` "
+            "(satu akun per baris).\n"
             "Coba kirim ulang, atau ketik /cancel untuk membatalkan.",
             parse_mode="Markdown",
         )
         return DO_WAITING_GHS
-    if not _is_valid_email(ghs_email):
+
+    # Validasi format email pada tiap akun.
+    invalid = [e for e, _, _ in ghs_accounts if not _is_valid_email(e)]
+    if invalid:
         await update.effective_chat.send_message(
-            "❌ Email GHS tidak valid. Coba kirim ulang, atau /cancel.",
+            "❌ Ada email GHS yang formatnya tidak valid:\n"
+            + "\n".join(f"• `{e}`" for e in invalid[:5])
+            + "\n\nPerbaiki dan kirim ulang, atau ketik /cancel.",
+            parse_mode="Markdown",
         )
         return DO_WAITING_GHS
 
-    context.user_data["do_ghs_email"] = ghs_email
-    context.user_data["do_ghs_password"] = ghs_pass
-    context.user_data["do_ghs_totp"] = ghs_totp
+    # Batasi jumlah GHS sesuai sisa klaim pada order.
+    order_id = context.user_data.get("do_claim_order_id", "")
+    total = context.user_data.get("do_claim_total", 1) or 1
+    order = db.get_order(order_id) if order_id else None
+    done = (order.get("do_claim_index", 0) if order else 0) or 0
+    remaining = max(total - done, 1)
 
+    if len(ghs_accounts) > remaining:
+        ghs_accounts = ghs_accounts[:remaining]
+        await update.effective_chat.send_message(
+            f"ℹ️ Kamu mengirim lebih banyak akun GHS dari yang dibutuhkan. "
+            f"Hanya *{remaining}* akun pertama yang akan dipakai.",
+            parse_mode="Markdown",
+        )
+
+    context.user_data["do_ghs_queue"] = ghs_accounts
+    # Set GHS pertama untuk jalur cookies (satu klaim per pesan).
+    context.user_data["do_ghs_email"] = ghs_accounts[0][0]
+    context.user_data["do_ghs_password"] = ghs_accounts[0][1]
+    context.user_data["do_ghs_totp"] = ghs_accounts[0][2]
+
+    count_note = (
+        f" ({len(ghs_accounts)} akun)" if len(ghs_accounts) > 1 else ""
+    )
     await update.effective_chat.send_message(
-        "✅ Akun GHS diterima.\n\n"
+        f"✅ Akun GHS diterima{count_note}.\n\n"
         "Sekarang pilih cara login ke akun *DigitalOcean* tujuan:",
         parse_mode="Markdown",
         reply_markup=build_do_method_keyboard(),
@@ -416,12 +486,16 @@ async def handle_choose_do_method(
         pass
 
     total = context.user_data.get("do_claim_total", 1) or 1
+    # Jumlah akun DO yang diminta = jumlah GHS yang sudah disiapkan (1:1).
+    ghs_queue = context.user_data.get("do_ghs_queue", [])
+    count = len(ghs_queue) if ghs_queue else total
 
     if method == "email":
-        if total > 1:
+        if count > 1:
             prompt = (
-                f"📝 *Input Akun DigitalOcean (Bulk x{total})*\n\n"
-                f"Kirim *{total} akun* DigitalOcean tujuan, *satu akun per baris*.\n\n"
+                f"📝 *Input Akun DigitalOcean (Bulk x{count})*\n\n"
+                f"Kirim *{count} akun* DigitalOcean tujuan, *satu akun per baris*.\n"
+                f"Tiap akun DO dipasangkan dengan satu akun GHS secara berurutan.\n\n"
                 f"Format tiap baris:\n"
                 f"`email:password`\n"
                 f"`email:password:TOTP_SECRET`\n"
@@ -509,17 +583,40 @@ async def handle_do_email(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     done = (order.get("do_claim_index", 0) if order else 0) or 0
     remaining = max(total - done, 1)
 
-    # Jangan proses lebih dari sisa yang dibutuhkan
-    if len(accounts) > remaining:
-        accounts = accounts[:remaining]
+    # Antrian GHS yang sudah disiapkan (seller dari stok / buyer dari input).
+    ghs_queue = list(context.user_data.get("do_ghs_queue", []))
+    if not ghs_queue:
+        # Fallback (kompatibilitas): pakai GHS tunggal yang tersimpan.
+        single = (
+            context.user_data.get("do_ghs_email", ""),
+            context.user_data.get("do_ghs_password", ""),
+            context.user_data.get("do_ghs_totp", ""),
+        )
+        if single[0] and single[1]:
+            ghs_queue = [single]
+
+    if not ghs_queue:
         await update.effective_chat.send_message(
-            f"ℹ️ Kamu mengirim lebih banyak akun dari yang dibutuhkan. "
-            f"Hanya *{remaining}* akun pertama yang akan diproses.",
+            "❌ Akun GHS tidak tersedia. Mulai ulang klaim dari tombol, atau /cancel.",
+        )
+        return ConversationHandler.END
+
+    # Batas akun yang diproses = min(sisa klaim, jumlah DO dikirim, jumlah GHS).
+    limit = min(remaining, len(accounts), len(ghs_queue))
+
+    if len(accounts) > limit:
+        await update.effective_chat.send_message(
+            f"ℹ️ Kamu mengirim lebih banyak akun dari yang bisa diproses. "
+            f"Hanya *{limit}* akun pertama yang akan diproses.",
             parse_mode="Markdown",
         )
 
-    # Simpan antrian akun yang akan diproses berurutan
-    context.user_data["do_accounts_queue"] = accounts
+    do_accounts = accounts[:limit]
+    ghs_accounts = ghs_queue[:limit]
+
+    # Simpan antrian akun yang akan diproses berurutan (DO + GHS dipasangkan 1:1).
+    context.user_data["do_accounts_queue"] = do_accounts
+    context.user_data["do_ghs_queue"] = ghs_accounts
 
     # Proses semua akun di antrian satu per satu
     await _process_email_queue(update, context)
@@ -537,16 +634,24 @@ async def _process_email_queue(
     spam. Setelah antrian habis, baru tampilkan prompt lanjutan / pesan selesai.
     """
     queue = context.user_data.get("do_accounts_queue", [])
+    ghs_queue = context.user_data.get("do_ghs_queue", [])
     order_id = context.user_data.get("do_claim_order_id", "")
     total = context.user_data.get("do_claim_total", 1) or 1
     chat = update.effective_chat
 
     # Tahan prompt per-iterasi
     context.user_data["do_suppress_next_prompt"] = True
-    for do_email, do_password, do_totp in queue:
+    # Pasangkan tiap akun DO dengan satu akun GHS (1:1). Setiap akun GHS hanya
+    # bisa menebus penawaran DigitalOcean satu kali, jadi pemasangan ini wajib.
+    for (do_email, do_password, do_totp), (ghs_email, ghs_password, ghs_totp) in zip(
+        queue, ghs_queue
+    ):
         context.user_data["do_email"] = do_email
         context.user_data["do_password"] = do_password
         context.user_data["do_totp"] = do_totp
+        context.user_data["do_ghs_email"] = ghs_email
+        context.user_data["do_ghs_password"] = ghs_password
+        context.user_data["do_ghs_totp"] = ghs_totp
         await _run_automation(update, context)
     context.user_data["do_suppress_next_prompt"] = False
 
@@ -849,7 +954,7 @@ async def _run_automation(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     # --- Jika masih ada akun tersisa untuk diklaim (bulk), kirim prompt berikutnya ---
     # Saat memproses antrian email (bulk sekali kirim), jangan kirim prompt tombol
-    # di tiap iterasi — biarkan _finish_email_queue yang menanganinya di akhir.
+    # di tiap iterasi — biarkan _process_email_queue yang menanganinya di akhir.
     suppress_next_prompt = context.user_data.get("do_suppress_next_prompt", False)
     if order_id_claim and result.success and not suppress_next_prompt:
         refreshed = db.get_order(order_id_claim)
