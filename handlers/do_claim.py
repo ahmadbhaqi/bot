@@ -252,6 +252,31 @@ def _parse_do_accounts_block(text: str) -> list[tuple[str, str, str]]:
     return result
 
 
+def _consume_seller_ghs(order_id: str, ghs_email: str) -> None:
+    """Hapus satu akun GHS seller dari order setelah berhasil dipakai.
+
+    Pencocokan dilakukan berdasarkan email (robust terhadap perbedaan format
+    pemisah ':' / '|'). Dengan menghapus akun yang sudah terpakai, percobaan
+    klaim berikutnya tidak akan memakai ulang akun yang sudah ditebus, dan
+    akun yang gagal tetap berada di antrian untuk dicoba lagi.
+    """
+    if not order_id or not ghs_email:
+        return
+    order = db.get_order(order_id)
+    if not order:
+        return
+    lines = [
+        line for line in (order.get("ghs_account_used") or "").splitlines() if line.strip()
+    ]
+    target = ghs_email.strip().lower()
+    for i, line in enumerate(lines):
+        email, _, _ = _parse_ghs(line)
+        if email.strip().lower() == target:
+            del lines[i]
+            db.update_order(order_id, ghs_account_used="\n".join(lines))
+            return
+
+
 def _clear_do_data(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Hapus semua data sensitif klaim DO dari user_data."""
     for key in (
@@ -332,14 +357,12 @@ async def entry_do_claim(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await query.answer("Akun GHS belum tersedia. Hubungi admin.", show_alert=True)
             return ConversationHandler.END
 
-        if done >= len(accounts):
-            await query.answer("Semua klaim DO sudah diproses.", show_alert=True)
-            return ConversationHandler.END
-
-        # Bangun antrian GHS seller: dari index berjalan sampai akhir, dibatasi
-        # oleh sisa klaim. Tiap GHS akan dipasangkan 1:1 dengan akun DO.
+        # Bangun antrian GHS seller dari DEPAN daftar yang tersisa (dibatasi sisa
+        # klaim). Akun GHS yang sudah berhasil ditebus telah dihapus dari order
+        # (lihat _consume_seller_ghs), jadi front-of-list selalu akun yang belum
+        # terpakai. Tiap GHS dipasangkan 1:1 dengan akun DO.
         ghs_queue: list[tuple[str, str, str]] = []
-        for raw_account in accounts[done : done + remaining]:
+        for raw_account in accounts[:remaining]:
             ghs_email, ghs_pass, ghs_totp = _parse_ghs(raw_account)
             if ghs_email and ghs_pass:
                 ghs_queue.append((ghs_email, ghs_pass, ghs_totp))
@@ -886,6 +909,18 @@ async def _run_automation(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         except Exception as exc_stock:
             # Jangan sampai error stok membatalkan laporan sukses ke user
             logger.error("[DO Claim] Error saat pindah GHS ke bekas: %s", exc_stock)
+
+        # Tandai akun GHS seller ini sudah terpakai pada order, supaya tidak
+        # dipakai ulang oleh percobaan klaim berikutnya (mencegah index drift
+        # saat sebagian klaim gagal di tengah batch bulk).
+        try:
+            _consume_seller_ghs(
+                context.user_data.get("do_claim_order_id", ""), ghs_email
+            )
+        except Exception as exc_consume:
+            logger.error(
+                "[DO Claim] Error saat menandai GHS seller terpakai: %s", exc_consume
+            )
 
     # --- Update pesan status dengan hasil automation ---
     order_id_claim = context.user_data.get("do_claim_order_id", "")
