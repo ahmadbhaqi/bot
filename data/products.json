@@ -1,0 +1,39 @@
+{
+  "ghs_fresh": {
+    "id": "ghs_fresh",
+    "name": "GHS FRESH",
+    "emoji": "🎓",
+    "description": "GitHub Education akun fresh/baru, dengan DigitalOcean $200 Credit masih utuh.\n\n✅ Akun fresh/baru\n✅ DO Credit $200 belum terpakai\n✅ GitHub Copilot aktif\n✅ Semua benefit GitHub Education\n⚡ Pengiriman otomatis setelah konfirmasi pembayaran",
+    "price": 25000,
+    "accounts": []
+  },
+  "ghs_do": {
+    "id": "ghs_do",
+    "name": "DO Claim – GHS Seller",
+    "emoji": "⚡",
+    "description": "Jasa AUTO KLAIM DigitalOcean $200 Credit ke akun DO milikmu, menggunakan akun GitHub Student dari stok kami.\n\n✅ Tidak perlu punya GHS sendiri\n✅ Kredit $200 diklaim otomatis oleh bot\n✅ Masuk ke akun DigitalOcean kamu sendiri\n✅ Berlaku 1 tahun sejak digunakan\n⚡ Proses otomatis setelah pembayaran",
+    "price": 25000,
+    "is_service": true,
+    "shared_stock_with": "ghs_fresh",
+    "hidden_in_menu": true,
+    "accounts": []
+  },
+  "ghs_do_buyer": {
+    "id": "ghs_do_buyer",
+    "name": "DO Claim – GHS Buyer",
+    "emoji": "🔗",
+    "description": "Jasa AUTO KLAIM DigitalOcean $200 Credit ke akun DO milikmu, menggunakan akun GitHub Student MILIKMU SENDIRI.\n\n✅ Pakai GHS kamu sendiri\n✅ Kredit $200 diklaim otomatis oleh bot\n✅ Masuk ke akun DigitalOcean kamu sendiri\n✅ Berlaku 1 tahun sejak digunakan\n💰 Harga lebih hemat karena GHS dari kamu\n⚡ Proses otomatis setelah pembayaran",
+    "price": 2000,
+    "is_service": true,
+    "hidden_in_menu": true,
+    "accounts": []
+  },
+  "ghs_bekas_do": {
+    "id": "ghs_bekas_do",
+    "name": "GHS Bekas DO",
+    "emoji": "♻️",
+    "description": "GitHub Education bekas yang DO credit-nya sudah terpakai.\n\n✅ GitHub Copilot masih aktif\n✅ Semua benefit GitHub Education lainnya\n⚠️ DigitalOcean credit sudah digunakan\n💰 Harga lebih terjangkau",
+    "price": 7000,
+    "accounts": []
+  }
+}

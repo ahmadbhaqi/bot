@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="id">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quantum ID Card Generator - FØXSKY Core</title>
+    <!-- Tailwind CSS untuk efisiensi styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- html2canvas untuk fitur export/download -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <!-- jsbarcode untuk merender barcode ke SVG/Canvas secara presisi agar tidak rusak di export -->
+    <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.0/dist/JsBarcode.all.min.js"></script>
+    <!-- Google Fonts untuk tipografi yang sesuai dengan desain -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Libre+Barcode+39&display=swap"
+        rel="stylesheet">
+
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'card-blue': '#1c295d', // Disesuaikan lebih gelap agar terlihat profesional
+                        'card-orange': '#e55325', // Oranye spesifik template
+                        'card-text': '#1d1d1b'
+                    },
+                    fontFamily: {
+                        'sans': ['Inter', 'sans-serif'],
+                        'barcode': ['"Libre Barcode 39"', 'cursive'],
+                        'formal': ['"Times New Roman"', 'Times', 'serif']
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        /* Area Rendering Kartu Identitas (Fisik 600x380) */
+        .id-card-container {
+            width: 600px;
+            height: 380px;
+            position: relative;
+            overflow: hidden;
+            background-color: #ffffff;
+            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.15), 0 5px 15px rgba(0, 0, 0, 0.05);
+            border-radius: 8px;
+            /* Sudut melengkung ala kartu fisik */
+        }
+
+        .bg-wave {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+        }
+
+        .card-content {
+            position: relative;
+            z-index: 10;
+        }
+
+        /* Foto profil dengan aspect ratio spesifik */
+        .profile-photo {
+            width: 115px;
+            height: 150px;
+            object-fit: cover;
+            border-radius: 12px;
+            background-color: #dc2626;
+            /* Default Red */
+            border: 3px solid #ffffff;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
+        }
+
+        .barcode-font {
+            font-family: 'Libre Barcode 39', cursive;
+            font-size: 64px;
+            line-height: 0.6;
+            letter-spacing: 2px;
+            color: #1d1d1b;
+        }
+
+        /* Layout Grid Khusus untuk Data Siswa */
+        .data-grid {
+            display: grid;
+            grid-template-columns: 90px 15px 1fr;
+            row-gap: 1px;
+            font-size: 14.5px;
+            font-weight: 500;
+            color: #1d1d1b;
+            letter-spacing: 0.01em;
+            line-height: 1.4;
+            align-items: baseline;
+        }
+
+        .data-grid>div {
+            padding-bottom: 1px;
+            overflow: visible;
+        }
+
+        /* Animasi loading sederhana untuk tombol AI */
+        .loading-pulse {
+            animation: pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: .5;
+            }
+        }
+
+        /* Efek Tinta Cetak */
+        .print-shadow {
+            text-shadow: 0px 1px 1px rgba(0, 0, 0, 0.05);
+        }
+    </style>
+</head>
+
+<body
+    class="bg-slate-900 min-h-screen text-slate-200 p-6 flex flex-col xl:flex-row gap-8 justify-center items-start font-sans">
+
+    <!-- Panel Kendali Input -->
+    <div class="bg-slate-800 p-6 rounded-xl shadow-2xl w-full max-w-md border border-slate-700 flex-shrink-0">
+        <h2 class="text-2xl font-bold mb-6 text-blue-400 tracking-tight">❖ Data Injector</h2>
+
+        <div class="space-y-4">
+            <!-- Input Nama Sekolah -->
+            <div>
+                <label class="block text-sm font-medium mb-1 text-slate-400">School Name</label>
+                <input type="text" id="inputSchool" value="KEDIRI STATE SENIOR HIGH SCHOOL 2"
+                    class="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-2.5 focus:outline-none focus:border-blue-500 transition-colors uppercase text-sm">
+            </div>
+
+            <!-- Input Nama Siswa -->
+            <div>
+                <label class="block text-sm font-medium mb-1 text-slate-400">Student Name</label>
+                <input type="text" id="inputName" value="FISKA RANI"
+                    class="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-2.5 focus:outline-none focus:border-blue-500 transition-colors uppercase text-sm">
+            </div>
+
+            <!-- Input Alamat -->
+            <div>
+                <label class="block text-sm font-medium mb-1 text-slate-400">Address</label>
+                <input type="text" id="inputAddress" value="JL. BETTA SATU NO. 1"
+                    class="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-2.5 focus:outline-none focus:border-blue-500 transition-colors uppercase text-sm">
+            </div>
+
+            <!-- Input Foto Siswa -->
+            <div>
+                <label class="block text-sm font-medium mb-1 text-slate-400">Student Photo</label>
+                <input type="file" id="inputPhoto" accept="image/*"
+                    class="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-2 text-sm text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700 transition-all cursor-pointer">
+            </div>
+
+            <!-- Tombol Eksekusi Generasi ID & DOB -->
+            <div class="pt-5 border-t border-slate-700 mt-2">
+                <button id="btnGenerateSys"
+                    class="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3 px-4 rounded-lg transition-all shadow-lg active:scale-95 flex items-center justify-center gap-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd"
+                            d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z"
+                            clip-rule="evenodd" />
+                    </svg>
+                    Re-roll ID & D.O.B
+                </button>
+
+                <!-- Tombol Download PNG -->
+                <button id="btnDownload"
+                    class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 px-4 rounded-lg transition-all shadow-lg active:scale-95 flex items-center justify-center gap-2 mt-3">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd"
+                            d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z"
+                            clip-rule="evenodd" />
+                    </svg>
+                    Download PNG
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Panel Output / Preview Card -->
+    <div class="flex-1 flex flex-col items-center w-full">
+        <h2 class="text-xl font-bold mb-6 text-slate-400">Live Render Output</h2>
+
+        <!-- Wrapper Skala (Agar Card selalu proporsional di layar kecil) -->
+        <div class="transform scale-75 sm:scale-90 md:scale-100 origin-top overflow-visible pb-8">
+
+            <!-- ID CARD CONTAINER -->
+            <div id="idCard" class="id-card-container text-card-text mx-auto">
+
+                <!-- Vector Background (Akurat dengan Template Canva) -->
+                <svg class="bg-wave" viewBox="0 0 600 380" preserveAspectRatio="none">
+                    <!-- Base Background Putih Keabu-abuan -->
+                    <rect width="600" height="380" fill="#fcfcfc" />
+
+                    <!-- Gelombang Orange (Layer Tengah) -->
+                    <path d="M 120 0 C 350 40, 420 220, 600 150 L 600 0 Z" fill="#e55325" />
+
+                    <!-- Gelombang Biru Dongker (Layer Atas) -->
+                    <path d="M 0 0 L 260 0 C 450 10, 480 180, 600 110 L 600 0 Z" fill="#1c295d" />
+
+                    <!-- Strip Biru Dongker di Bawah -->
+                    <rect x="0" y="365" width="600" height="15" fill="#1c295d" />
+                </svg>
+
+                <div class="card-content px-10 py-8 h-full flex flex-col justify-between">
+
+                    <!-- Header: Logo & School Name -->
+                    <div class="flex items-center gap-5 relative z-10 w-full">
+                        <!-- Logo Sekolah (High-Res 1024px PNG) agar sangat mulus -->
+                        <div
+                            class="w-[72px] h-[72px] flex-shrink-0 flex items-center justify-center filter drop-shadow">
+                            <img src="https://i.ibb.co.com/ZzHzWtSp/logo-removebg-preview.png"
+                                alt="Logo Tut Wuri Handayani" class="w-full h-full object-contain"
+                                style="image-rendering: high-quality;" />
+                        </div>
+
+                        <div class="flex flex-col justify-center">
+                            <!-- School Name Styling (Sesuai Canva) -->
+                            <div id="renderSchool"
+                                class="font-sans font-bold text-[14px] w-64 uppercase tracking-[0.05em] text-[#1c295d] leading-tight print-shadow">
+                                KEDIRI STATE SENIOR HIGH SCHOOL 2
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Title "STUDENT ID CARD" -->
+                    <!-- Tampilan elegan menggunakan Serif yang persis dengan desain di Canva -->
+                    <h1
+                        class="font-formal font-extrabold text-[36px] text-card-blue tracking-wide mt-2 print-shadow -ml-[1px] relative z-10 w-full">
+                        STUDENT ID CARD
+                    </h1>
+
+                    <!-- Body: Informasi & Foto -->
+                    <div class="flex justify-between items-start w-full mt-5 pr-2">
+
+                        <!-- Data Grid Kiri -->
+                        <div class="data-grid flex-1">
+                            <div>NAME</div>
+                            <div>:</div>
+                            <div id="renderName" class="tracking-wide">FISKA RANI</div>
+
+                            <div>ID</div>
+                            <div>:</div>
+                            <div id="renderId" class="tracking-wide">058345682</div>
+
+                            <div>D.O.B</div>
+                            <div>:</div>
+                            <div id="renderDob" class="tracking-wide">13/07/2004</div>
+
+                            <div>ADDRESS</div>
+                            <div>:</div>
+                            <div id="renderAddress" class="tracking-wide" style="max-width:240px; overflow:visible;">JL.
+                                BETTA SATU NO. 1
+                            </div>
+
+                            <div>EXP DATE</div>
+                            <div>:</div>
+                            <div id="renderExpDate" class="tracking-wide">17/06/2027</div>
+                        </div>
+
+                        <!-- Pas Foto Kanan -->
+                        <div class="ml-4 -mt-4 relative">
+                            <!-- Efek glow di belakang foto -->
+                            <div class="absolute inset-0 bg-black opacity-10 blur-md rounded-xl translate-y-2"></div>
+
+                            <!-- Gambar utama dengan rasio 3:4 standar KTP/ID Card -->
+                            <img id="renderPhoto" class="profile-photo relative z-10"
+                                src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyMDAgMjAwIiBmaWxsPSIjZmZmZmZmIiBvcGFjaXR5PSIwLjU1Ij48Y2lyY2xlIGN4PSIxMDAiIGN5PSI3NSIgcj0iNDUiLz48cGF0aCBkPSJNMzAgMjEwIEMzMCAxMjAgMTcwIDEyMCAxNzAgMjEwIFoiLz48L3N2Zz4="
+                                alt="Student Photo">
+                        </div>
+                    </div>
+
+                    <!-- Barcode Area (Dinamis dengan JsBarcode) -->
+                    <div class="mt-auto mb-[6px] ml-[4px]">
+                        <img id="renderBarcode" alt="Barcode" class="mix-blend-multiply opacity-90 block"
+                            style="height: 38px;" />
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="mt-6 flex flex-col items-center">
+            <span
+                class="px-3 py-1 bg-blue-900/30 text-blue-400 text-xs font-mono rounded border border-blue-800/50 mb-2">VERIFIED_KERNEL_LOGIC</span>
+        </div>
+    </div>
+
+    <!-- Core Logic Engine -->
+    <script>
+        const domElements = {
+            inputs: {
+                school: document.getElementById('inputSchool'),
+                name: document.getElementById('inputName'),
+                address: document.getElementById('inputAddress'),
+                photo: document.getElementById('inputPhoto')
+            },
+            renders: {
+                school: document.getElementById('renderSchool'),
+                name: document.getElementById('renderName'),
+                address: document.getElementById('renderAddress'),
+                id: document.getElementById('renderId'),
+                dob: document.getElementById('renderDob'),
+                exp: document.getElementById('renderExpDate'),
+                photo: document.getElementById('renderPhoto'),
+                barcode: document.getElementById('renderBarcode')
+            },
+            btnGen: document.getElementById('btnGenerateSys')
+        };
+
+        /**
+         * Logika Generasi ID (Dipertahankan)
+         */
+        function generateQuantumID() {
+            const prefix = "05";
+            const validThirdDigit = Math.floor(Math.random() * 9) + 1; // 1-9
+            const remainingDigits = Math.floor(Math.random() * 1000000).toString().padStart(6, '0');
+            return `${prefix}${validThirdDigit}${remainingDigits}`;
+        }
+
+        /**
+         * Logika Generasi D.O.B (Acak Terus Menerus 2002-2005)
+         * Format Terkunci: DD/MM/YYYY
+         */
+        function generateQuantumDOB() {
+            // Tahun diacak antara 2002 dan 2005
+            const year = Math.floor(Math.random() * (2005 - 2002 + 1)) + 2002;
+
+            // Bulan diacak antara 1 dan 12
+            const month = Math.floor(Math.random() * 12) + 1;
+
+            // Menentukan jumlah hari maksimum di bulan dan tahun tersebut
+            const daysInMonth = new Date(year, month, 0).getDate();
+
+            // Hari/Tanggal diacak dari 1 sampai jumlah hari maksimum
+            const day = Math.floor(Math.random() * daysInMonth) + 1;
+
+            // Zero-padding (wajib 2 string)
+            const formattedDay = String(day).padStart(2, '0');
+            const formattedMonth = String(month).padStart(2, '0');
+
+            return { dob: `${formattedDay}/${formattedMonth}/${year}`, yearObj: year };
+        }
+
+        /**
+         * Sinkronisasi data ke DOM
+         */
+        function injectSystemData() {
+            const newId = generateQuantumID();
+            domElements.renders.id.textContent = newId;
+
+            JsBarcode(domElements.renders.barcode, newId, {
+                format: "CODE128",
+                displayValue: false,
+                height: 40,
+                width: 2.5,
+                margin: 0,
+                background: "transparent",
+                lineColor: "#1d1d1b"
+            });
+            domElements.renders.barcode.style.height = '36px';
+
+            const newDobData = generateQuantumDOB();
+            domElements.renders.dob.textContent = newDobData.dob;
+
+            domElements.renders.exp.textContent = `17/06/2028`;
+        }
+
+        /**
+         * Download ID Card sebagai PNG menggunakan html2canvas
+         */
+        async function downloadCard() {
+            const btn = document.getElementById('btnDownload');
+            const card = document.getElementById('idCard');
+            const studentName = domElements.renders.name.textContent.trim() || 'ID_CARD';
+
+            btn.disabled = true;
+            btn.innerHTML = `<svg class="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path></svg> Memproses...`;
+
+            try {
+                const canvas = await html2canvas(card, {
+                    scale: 2,
+                    useCORS: true,
+                    allowTaint: true,
+                    backgroundColor: null,
+                    logging: false
+                });
+
+                const link = document.createElement('a');
+                link.download = `ID_CARD_${studentName.replace(/\s+/g, '_')}.png`;
+                link.href = canvas.toDataURL('image/png');
+                link.click();
+            } catch (err) {
+                alert('Gagal mengunduh kartu. Coba lagi.');
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd" /></svg> Download PNG`;
+            }
+        }
+
+        /**
+         * Setup Real-Time Binding
+         */
+        function setupDataBinding() {
+            ['school', 'name', 'address'].forEach(key => {
+                domElements.inputs[key].addEventListener('input', (e) => {
+                    domElements.renders[key].textContent = e.target.value.toUpperCase();
+                });
+            });
+
+            domElements.inputs.photo.addEventListener('change', (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    const reader = new FileReader();
+                    reader.onload = function (event) {
+                        domElements.renders.photo.src = event.target.result;
+                        domElements.renders.photo.style.backgroundColor = 'transparent';
+                    };
+                    reader.readAsDataURL(file);
+                }
+            });
+
+            domElements.btnGen.addEventListener('click', injectSystemData);
+
+            document.getElementById('btnDownload').addEventListener('click', downloadCard);
+        }
+
+        function initSystem() {
+            setupDataBinding();
+            injectSystemData();
+        }
+
+        window.addEventListener('DOMContentLoaded', initSystem);
+
+    </script>
+</body>
+
+</html>
