@@ -348,12 +348,105 @@ async def _page_text(page) -> str:
         return ""
 
 
+async def _resilient_goto(
+    page,
+    url: str,
+    wait_until: str = "domcontentloaded",
+    tries: int = 3,
+    settle: float = 1.0,
+):
+    """Navigasi tahan-banting: pulih otomatis bila tab Chromium 'Page crashed'.
+
+    Halaman billing DigitalOcean berat dan kadang membuat render process
+    Chromium crash ('Page.goto: Page crashed'), terutama di hosting ber-RAM
+    kecil. Bila terjadi, halaman yang crash ditutup lalu dibuat ulang di
+    context yang SAMA (cookie/sesi tetap utuh) dan navigasi diulang.
+
+    Memakai wait_until='domcontentloaded' (bukan 'load') agar lebih cepat &
+    tidak menunggu seluruh resource SPA yang berat.
+
+    Return: (page_aktif, error_or_None). page_aktif bisa berbeda dari argumen
+    bila halaman lama crash dan diganti dengan yang baru.
+    """
+    last_err = None
+    for attempt in range(1, tries + 1):
+        try:
+            await page.goto(url, timeout=NAV_TIMEOUT, wait_until=wait_until)
+            if settle:
+                await asyncio.sleep(settle)
+            return page, None
+        except Exception as exc:
+            last_err = exc
+            msg = str(exc).lower()
+            crashed = (
+                "crash" in msg
+                or "target closed" in msg
+                or "target page" in msg
+                or "page closed" in msg
+            )
+            logger.warning(
+                "[DO Claimer] goto %s gagal (percobaan %d/%d): %s",
+                url, attempt, tries, exc,
+            )
+            if crashed and attempt < tries:
+                # Tab crash → buat halaman baru di context yang sama (sesi tetap).
+                try:
+                    ctx = page.context
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass
+                    page = await ctx.new_page()
+                    logger.info("[DO Claimer] Halaman dibuat ulang setelah crash.")
+                except Exception as rec_exc:
+                    logger.warning(
+                        "[DO Claimer] Gagal membuat ulang halaman: %s", rec_exc
+                    )
+            await asyncio.sleep(1.5)
+    return page, last_err
+
+
+async def _wait_login_resolved(
+    page, otp_selectors: list, total_ms: int = 10_000
+) -> None:
+    """Tunggu sampai login selesai: URL keluar dari '/login' ATAU field OTP muncul.
+
+    Menggantikan sleep tetap pasca-submit; kembali lebih cepat bila halaman
+    sudah berpindah, namun tetap menunggu hingga total_ms bila perlu.
+    """
+    step = 0.4
+    waited = 0.0
+    while waited < total_ms / 1000:
+        try:
+            if "login" not in page.url.lower():
+                return
+        except Exception:
+            return
+        if await _any_visible(page, otp_selectors, timeout=300):
+            return
+        await asyncio.sleep(step)
+        waited += step
+
+
 def _browser_args() -> list:
     args = [
         "--no-sandbox",
         "--disable-setuid-sandbox",
+        # /dev/shm kecil di banyak hosting → render proc 'Page crashed' (OOM).
+        # Flag ini memaksa Chromium pakai /tmp, mengurangi crash tab di DO billing.
         "--disable-dev-shm-usage",
         "--disable-gpu",
+        "--disable-software-rasterizer",
+        # Kurangi pemakaian memori & proses agar tab tidak crash di halaman berat.
+        "--disable-features=site-per-process,Translate,BackForwardCache,AcceptCHFrame",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--disable-extensions",
+        "--no-first-run",
+        "--no-default-browser-check",
+        # Batasi heap V8 agar tidak meledak di SPA berat (billing DigitalOcean).
+        "--js-flags=--max-old-space-size=512",
     ]
     # Flag ini menjadi 'tell' bot; hanya dipakai bila patchright TIDAK aktif.
     _, using_patch = _import_async_playwright()
@@ -970,7 +1063,7 @@ async def _maybe_handle_do_2fa(page, do_totp: str) -> Optional[ClaimResult]:
         )
 
     await _try_click(page, DO_OTP_SUBMIT_SELECTORS, timeout=4_000)
-    await asyncio.sleep(4)
+    await asyncio.sleep(2.5)
     return None
 
 
@@ -1287,16 +1380,20 @@ async def _count_promo_rows(page) -> int:
 
 async def _login_do_direct(
     page, do_email: str, do_password: str, do_totp: str
-) -> Optional[ClaimResult]:
+) -> Tuple[object, Optional[ClaimResult]]:
     """Login langsung ke cloud.digitalocean.com/login (bukan via OAuth GitHub).
 
-    Mendukung 2FA TOTP. Return None bila sukses, ClaimResult(False,...) bila gagal.
+    Mendukung 2FA TOTP. Return (page_aktif, None) bila sukses, atau
+    (page_aktif, ClaimResult(False,...)) bila gagal. `page_aktif` bisa berbeda
+    dari argumen bila halaman lama crash dan dibuat ulang.
     """
-    try:
-        await page.goto(DO_LOGIN_URL, timeout=NAV_TIMEOUT)
-        await asyncio.sleep(2)
-    except Exception as exc:
-        return ClaimResult(False, f"Tidak bisa membuka halaman login DigitalOcean: {exc}")
+    page, nav_err = await _resilient_goto(page, DO_LOGIN_URL, settle=1.0)
+    if nav_err:
+        return page, ClaimResult(
+            False,
+            f"Tidak bisa membuka halaman login DigitalOcean: {nav_err}",
+            await _safe_screenshot(page),
+        )
 
     await _dismiss_do_consent(page)
 
@@ -1305,10 +1402,10 @@ async def _login_do_direct(
         page, DO_EMAIL_SELECTORS, timeout=3_000
     ):
         logger.info("[DO Coupon] Sesi DO sudah aktif (tanpa login ulang).")
-        return None
+        return page, None
 
     if not (do_email and do_password):
-        return ClaimResult(
+        return page, ClaimResult(
             False,
             "Kredensial DigitalOcean tidak tersedia untuk login.",
             await _safe_screenshot(page),
@@ -1317,13 +1414,13 @@ async def _login_do_direct(
     logger.info("[DO Coupon] Login DigitalOcean: %s", do_email)
 
     if not await _try_fill(page, DO_EMAIL_SELECTORS, do_email):
-        return ClaimResult(
+        return page, ClaimResult(
             False,
             "Field email DigitalOcean tidak ditemukan (mungkin ada CAPTCHA).",
             await _safe_screenshot(page),
         )
     if not await _try_fill(page, DO_PASSWORD_SELECTORS, do_password):
-        return ClaimResult(
+        return page, ClaimResult(
             False,
             "Field password DigitalOcean tidak ditemukan.",
             await _safe_screenshot(page),
@@ -1331,18 +1428,19 @@ async def _login_do_direct(
     # Tutup modal cookie sekali lagi: kerap muncul telat & menutupi tombol login.
     await _dismiss_do_consent(page)
     if not await _try_click(page, DO_LOGIN_SUBMIT_SELECTORS):
-        return ClaimResult(
+        return page, ClaimResult(
             False,
             "Tombol Log In DigitalOcean tidak ditemukan.",
             await _safe_screenshot(page),
         )
 
-    await asyncio.sleep(4)
+    # Tunggu cerdas: keluar dari /login atau munculnya field 2FA (lebih cepat).
+    await _wait_login_resolved(page, DO_OTP_SELECTORS, total_ms=10_000)
 
     # 2FA DigitalOcean (TOTP)
     twofa_err = await _maybe_handle_do_2fa(page, do_totp)
     if twofa_err:
-        return twofa_err
+        return page, twofa_err
 
     # Masih di halaman login → kredensial salah
     if "login" in page.url.lower() and await _any_visible(
@@ -1354,34 +1452,36 @@ async def _login_do_direct(
             if await err.is_visible(timeout=2_000):
                 msg = (await err.text_content() or "").strip()
                 if msg:
-                    return ClaimResult(
+                    return page, ClaimResult(
                         False,
                         f"Login DigitalOcean gagal: {msg[:200]}",
                         await _safe_screenshot(page),
                     )
         except Exception:
             pass
-        return ClaimResult(
+        return page, ClaimResult(
             False,
             "Login DigitalOcean gagal. Email/password salah atau butuh verifikasi tambahan.",
             await _safe_screenshot(page),
         )
 
     logger.info("[DO Coupon] Login DigitalOcean sukses. URL: %s", page.url)
-    return None
+    return page, None
 
 
-async def _apply_coupon(page, promo_code: str) -> ClaimResult:
+async def _apply_coupon(page, promo_code: str) -> Tuple[object, ClaimResult]:
     """Buka billing, isi promo code, submit (dengan fallback Tab+Enter),
     lalu verifikasi via tabel promo (≥2 kupon = sukses).
+
+    Return (page_aktif, ClaimResult). `page_aktif` bisa berbeda bila halaman
+    billing crash dan dibuat ulang.
     """
-    # --- Buka halaman billing ---
-    try:
-        await page.goto(DO_BILLING_URL, timeout=NAV_TIMEOUT)
-        await asyncio.sleep(3)
-    except Exception as exc:
-        return ClaimResult(
-            False, f"Tidak bisa membuka halaman billing DigitalOcean: {exc}",
+    # --- Buka halaman billing (tahan-banting terhadap 'Page crashed') ---
+    page, nav_err = await _resilient_goto(page, DO_BILLING_URL, settle=2.0)
+    if nav_err:
+        return page, ClaimResult(
+            False,
+            f"Tidak bisa membuka halaman billing DigitalOcean: {nav_err}",
             await _safe_screenshot(page),
         )
 
@@ -1403,7 +1503,7 @@ async def _apply_coupon(page, promo_code: str) -> ClaimResult:
             continue
 
     if promo_loc is None:
-        return ClaimResult(
+        return page, ClaimResult(
             False,
             "Field promo code tidak ditemukan di halaman billing.\n"
             "Tampilan DigitalOcean mungkin berubah, atau akun belum punya "
@@ -1415,9 +1515,9 @@ async def _apply_coupon(page, promo_code: str) -> ClaimResult:
         await promo_loc.click()
         await promo_loc.fill("")
         await promo_loc.fill(promo_code)
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.4)
     except Exception as exc:
-        return ClaimResult(
+        return page, ClaimResult(
             False, f"Gagal mengisi promo code: {exc}", await _safe_screenshot(page)
         )
 
@@ -1432,7 +1532,7 @@ async def _apply_coupon(page, promo_code: str) -> ClaimResult:
         logger.info("[DO Coupon] Tombol submit tidak ada, fallback Tab+Enter.")
         try:
             await promo_loc.press("Tab")
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
             await page.keyboard.press("Enter")
         except Exception:
             try:
@@ -1440,24 +1540,20 @@ async def _apply_coupon(page, promo_code: str) -> ClaimResult:
             except Exception:
                 pass
 
-    await asyncio.sleep(5)
+    await asyncio.sleep(2)
 
     # --- Verifikasi: cek tabel promo (≥2 kupon ter-apply = sukses) ---
     # Reload halaman billing agar tabel menampilkan kupon terbaru.
-    try:
-        await page.goto(DO_BILLING_URL, timeout=NAV_TIMEOUT)
-        await asyncio.sleep(3)
-        await _dismiss_do_consent(page)
-    except Exception:
-        pass
+    page, _reload_err = await _resilient_goto(page, DO_BILLING_URL, settle=1.5)
+    await _dismiss_do_consent(page)
 
     after = 0
     # Beri beberapa kesempatan; tabel kadang lambat render.
-    for _ in range(4):
+    for _ in range(5):
         after = await _count_promo_rows(page)
         if after >= 2 or after > before:
             break
-        await asyncio.sleep(3)
+        await asyncio.sleep(1.2)
 
     logger.info(
         "[DO Coupon] Jumlah baris promo setelah apply: %d (sebelum: %d)",
@@ -1480,7 +1576,7 @@ async def _apply_coupon(page, promo_code: str) -> ClaimResult:
 
     # Sukses bila sudah ada ≥2 kupon ter-apply ATAU jumlah baris bertambah
     if after >= 2 or (before > 0 and after > before):
-        return ClaimResult(
+        return page, ClaimResult(
             True,
             "✅ *Kupon DigitalOcean Berhasil Diklaim!*\n\n"
             f"💰 Promo `{promo_code}` ter-apply ke akun.\n"
@@ -1490,14 +1586,14 @@ async def _apply_coupon(page, promo_code: str) -> ClaimResult:
         )
 
     if matched_err:
-        return ClaimResult(
+        return page, ClaimResult(
             False,
             f"Kupon gagal diklaim (terdeteksi: '{matched_err}').\n"
             f"Kode: `{promo_code}`",
             screenshot,
         )
 
-    return ClaimResult(
+    return page, ClaimResult(
         False,
         "⚠️ Tidak dapat memverifikasi kupon ter-apply.\n"
         f"Jumlah kupon terdeteksi: {after} (dibutuhkan ≥2).\n"
@@ -1532,12 +1628,13 @@ async def claim_coupon_with_email(
         page = await context.new_page()
         try:
             logger.info("[DO Coupon] Mulai klaim kupon. DO: %s", do_email)
-            login_err = await _login_do_direct(
+            page, login_err = await _login_do_direct(
                 page, do_email, do_password, do_totp_secret
             )
             if login_err:
                 return login_err
-            return await _apply_coupon(page, promo_code)
+            page, result = await _apply_coupon(page, promo_code)
+            return result
         except Exception as exc:
             logger.exception("[DO Coupon] Error tak terduga (email)")
             return ClaimResult(
@@ -1579,7 +1676,8 @@ async def claim_coupon_with_cookies(
             logger.info("[DO Coupon] Mulai klaim kupon (cookies, %d cookie).", len(do_cookies))
             normalized = _normalise_cookies(do_cookies)
             await context.add_cookies(normalized)
-            return await _apply_coupon(page, promo_code)
+            page, result = await _apply_coupon(page, promo_code)
+            return result
         except Exception as exc:
             logger.exception("[DO Coupon] Error tak terduga (cookies)")
             return ClaimResult(
@@ -1610,12 +1708,13 @@ async def _apply_coupons_multi(page, promo_codes: list) -> list:
     for idx, code in enumerate(promo_codes, start=1):
         logger.info("[DO Coupon] Bulk apply %d/%d: %s", idx, len(promo_codes), code)
         try:
-            r = await _apply_coupon(page, code)
+            # _apply_coupon bisa membuat ulang page (recovery crash); thread page.
+            page, r = await _apply_coupon(page, code)
         except Exception as exc:
             logger.exception("[DO Coupon] Bulk apply error untuk %s", code)
             r = ClaimResult(False, f"Error saat apply `{code}`: {exc}", None)
         results.append(r)
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
     return results
 
 
@@ -1643,7 +1742,7 @@ async def claim_coupons_with_email(
         context = await _new_clean_context(browser)
         page = await context.new_page()
         try:
-            login_err = await _login_do_direct(
+            page, login_err = await _login_do_direct(
                 page, do_email, do_password, do_totp_secret
             )
             if login_err:
@@ -1743,11 +1842,12 @@ async def claim_coupon_bulk_emails(
                 browser = await _launch_browser(pw)
                 context = await _new_clean_context(browser)
                 page = await context.new_page()
-                login_err = await _login_do_direct(page, email, password, totp)
+                page, login_err = await _login_do_direct(page, email, password, totp)
                 if login_err:
                     results.append(login_err)
                 else:
-                    results.append(await _apply_coupon(page, promo_code))
+                    page, result = await _apply_coupon(page, promo_code)
+                    results.append(result)
             except Exception as exc:
                 logger.exception("[DO Coupon] Bulk error akun %s", email)
                 shot = await _safe_screenshot(page) if page else None

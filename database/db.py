@@ -1,5 +1,7 @@
 import json
 import os
+import shutil
+import tempfile
 import threading
 import uuid
 from datetime import datetime
@@ -13,22 +15,94 @@ SETTINGS_FILE = os.path.join(_BASE, "..", "data", "settings.json")
 
 _lock = threading.Lock()
 
+
+# =============================================================
+# I/O TAHAN-BANTING (atomic write + pembacaan aman korupsi)
+# =============================================================
+#
+# JSON file (orders.json, users.json) menyimpan data finansial: order yang
+# sudah dibayar dan SALDO setiap user. Dua risiko dijaga di sini:
+#
+#   1. Penulisan terputus (proses mati / disk penuh) → file korup separuh.
+#      Solusi: tulis ke file sementara lalu os.replace (atomic di satu FS),
+#      sehingga file tujuan selalu utuh (versi lama atau versi baru penuh).
+#
+#   2. Membaca file korup lalu mengembalikan {} → seluruh saldo/order HILANG
+#      saat penyimpanan berikutnya menimpa dengan {}.
+#      Solusi: bila file ADA & tidak kosong tapi gagal di-parse, JANGAN
+#      mengembalikan {} begitu saja; backup file korup lalu RAISE agar
+#      pemanggil tidak menimpa data dengan dict kosong.
+
+
+def _atomic_write_json(path: str, data: Any) -> None:
+    """Tulis JSON secara atomik: file temp di folder sama → fsync → os.replace.
+
+    Mencegah file korup separuh bila proses mati saat menulis. os.replace
+    bersifat atomik selama temp & target berada di filesystem yang sama,
+    karena itu temp dibuat di direktori tujuan.
+    """
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix=".tmp_", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        # Bersihkan temp bila gagal agar tidak menumpuk.
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _read_json(path: str, default: Any) -> Any:
+    """Baca JSON dengan aman terhadap korupsi.
+
+    - File tidak ada / kosong → kembalikan `default` (kondisi normal awal).
+    - File ada & berisi tapi GAGAL di-parse → backup ke `<file>.corrupt-<ts>`
+      lalu RAISE. Ini sengaja: lebih baik gagal keras daripada diam-diam
+      menimpa saldo/order dengan data kosong.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except FileNotFoundError:
+        return default
+
+    if not content.strip():
+        return default
+
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError as exc:
+        backup = f"{path}.corrupt-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        try:
+            shutil.copy2(path, backup)
+        except OSError:
+            backup = "(gagal backup)"
+        raise RuntimeError(
+            f"File data '{os.path.basename(path)}' korup dan tidak bisa dibaca. "
+            f"Backup disimpan di '{backup}'. Penyimpanan dibatalkan demi "
+            f"melindungi data saldo/order. Detail: {exc}"
+        ) from exc
+
+
 # =============================================================
 # SETTINGS
 # =============================================================
 
 
 def _load_settings() -> Dict[str, Any]:
-    try:
-        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+    return _read_json(SETTINGS_FILE, {})
 
 
 def _save_settings(data: Dict[str, Any]) -> None:
-    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    _atomic_write_json(SETTINGS_FILE, data)
 
 
 def get_setting(key: str, default: Any = None) -> Any:
@@ -50,13 +124,11 @@ def set_setting(key: str, value: Any) -> None:
 
 
 def load_products() -> Dict[str, Any]:
-    with open(PRODUCTS_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    return _read_json(PRODUCTS_FILE, {})
 
 
 def _save_products(data: Dict[str, Any]) -> None:
-    with open(PRODUCTS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    _atomic_write_json(PRODUCTS_FILE, data)
 
 
 def get_product(product_id: str) -> Optional[Dict[str, Any]]:
@@ -206,16 +278,11 @@ def take_all_stock(product_id: str) -> List[str]:
 
 
 def load_orders() -> Dict[str, Any]:
-    try:
-        with open(ORDERS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+    return _read_json(ORDERS_FILE, {})
 
 
 def _save_orders(data: Dict[str, Any]) -> None:
-    with open(ORDERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    _atomic_write_json(ORDERS_FILE, data)
 
 
 def create_order(
@@ -555,16 +622,11 @@ USERS_FILE = os.path.join(_BASE, "..", "data", "users.json")
 
 
 def _load_users() -> Dict[str, Any]:
-    try:
-        with open(USERS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+    return _read_json(USERS_FILE, {})
 
 
 def _save_users(data: Dict[str, Any]) -> None:
-    with open(USERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    _atomic_write_json(USERS_FILE, data)
 
 
 def track_user(user_id: int, username: str = "", first_name: str = "") -> None:
