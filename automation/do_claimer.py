@@ -166,10 +166,36 @@ DO_OTP_SUBMIT_SELECTORS = [
     'button[type="submit"]',
 ]
 
-# DigitalOcean cookie-consent (TrustArc)
+# DigitalOcean cookie-consent.
+# DO memakai beberapa varian banner/modal cookie tergantung region & A/B test:
+#   - TrustArc lama: tombol "Agree & Proceed" (#truste-consent-button)
+#   - Modal preferensi (lihat screenshot): "ACCEPT ALL" / "DECLINE ALL" +
+#     toggle Required/Functional/Advertising Cookies (Osano/OneTrust style).
+# Modal ini menutupi form login sehingga tombol "Log In" tidak bisa diklik.
+# Urutan selector dibuat agar tombol "Accept/Agree" diprioritaskan.
 DO_CONSENT_SELECTORS = [
+    # TrustArc
     "#truste-consent-button",
     'button:has-text("Agree & Proceed")',
+    # Osano (dipakai DigitalOcean)
+    ".osano-cm-accept-all",
+    ".osano-cm-accept",
+    ".osano-cm-button--type_accept",
+    ".osano-cm-denyAll",
+    ".osano-cm-deny",
+    # OneTrust
+    "#onetrust-accept-btn-handler",
+    "#onetrust-reject-all-handler",
+    ".onetrust-close-btn-handler",
+    # Teks generik dari modal di screenshot (case-insensitive)
+    'button:has-text("Accept All")',
+    'button:has-text("Accept all")',
+    'button:has-text("Decline All")',
+    'button:has-text("Decline all")',
+    'button:has-text("Submit All Preferences")',
+    'button:has-text("Accept")',
+    'button[aria-label*="accept" i]',
+    'button[aria-label*="agree" i]',
 ]
 
 # DigitalOcean "Authenticate with GitHub"  [dari screenshot]
@@ -782,12 +808,55 @@ async def _open_do_offer(page, context) -> Tuple[Optional[object], Optional[str]
 # ------------------------------------------------------------------
 
 
-async def _dismiss_do_consent(page) -> None:
-    """Klik 'Agree & Proceed' pada banner cookie DO bila muncul (no-op jika tidak)."""
+async def _dismiss_do_consent(page) -> bool:
+    """Tutup banner/modal cookie DigitalOcean bila muncul.
+
+    Menangani beberapa varian: TrustArc ("Agree & Proceed"), modal preferensi
+    Osano/OneTrust ("ACCEPT ALL"/"DECLINE ALL"), dll. Modal ini bisa muncul
+    dengan jeda beberapa detik dan MENUTUPI form login, sehingga tombol "Log In"
+    tidak bisa diklik bila tidak ditutup lebih dulu.
+
+    Dipanggil berulang (retry) karena modal kadang muncul telat. Return True
+    bila ada banner yang berhasil ditutup. No-op (return False) bila tidak ada.
+    """
+    dismissed = False
+    for attempt in range(3):
+        clicked = await _try_click(page, DO_CONSENT_SELECTORS, timeout=2_000)
+        if clicked:
+            dismissed = True
+            logger.info("[DO Claimer] Banner cookie DigitalOcean ditutup.")
+            await asyncio.sleep(1)
+            # Kadang modal punya beberapa lapis; coba sekali lagi cepat.
+            continue
+        break
+
+    # Jaring pengaman: bila masih ada overlay yang menutupi form, paksa
+    # sembunyikan via JS agar tidak menghalangi klik tombol login.
     try:
-        await _try_click(page, DO_CONSENT_SELECTORS, timeout=3_000)
+        await page.evaluate(
+            """() => {
+                const sels = [
+                    '.osano-cm-window', '.osano-cm-dialog',
+                    '#onetrust-consent-sdk', '#onetrust-banner-sdk',
+                    '.ot-sdk-container', '#truste-consent-track',
+                    '.truste_overlay', '.truste_box_overlay',
+                ];
+                for (const s of sels) {
+                    document.querySelectorAll(s).forEach(el => {
+                        el.style.setProperty('display', 'none', 'important');
+                        el.style.setProperty('visibility', 'hidden', 'important');
+                    });
+                }
+                // Hapus overlay backdrop yang mungkin menahan pointer events.
+                document.querySelectorAll(
+                    '[class*="overlay" i][class*="cookie" i], [class*="cookie" i][class*="overlay" i]'
+                ).forEach(el => el.style.setProperty('display', 'none', 'important'));
+            }"""
+        )
     except Exception:
         pass
+
+    return dismissed
 
 
 # ------------------------------------------------------------------
@@ -837,6 +906,8 @@ async def _login_do_if_needed(
             "Field password DigitalOcean tidak ditemukan.",
             await _safe_screenshot(page),
         )
+    # Tutup modal cookie sekali lagi: kerap muncul telat & menutupi tombol login.
+    await _dismiss_do_consent(page)
     if not await _try_click(page, DO_LOGIN_SUBMIT_SELECTORS):
         return ClaimResult(
             False,
@@ -1257,6 +1328,8 @@ async def _login_do_direct(
             "Field password DigitalOcean tidak ditemukan.",
             await _safe_screenshot(page),
         )
+    # Tutup modal cookie sekali lagi: kerap muncul telat & menutupi tombol login.
+    await _dismiss_do_consent(page)
     if not await _try_click(page, DO_LOGIN_SUBMIT_SELECTORS):
         return ClaimResult(
             False,
