@@ -164,10 +164,28 @@ DO_OTP_SUBMIT_SELECTORS = [
     'button[type="submit"]',
 ]
 
-# DigitalOcean cookie-consent (TrustArc)
+# DigitalOcean cookie-consent banner / preference modal.
+# Mencakup beberapa varian: TrustArc ("Agree & Proceed") dan modal preferensi
+# cookie bergaya OneTrust ("ACCEPT ALL" / "DECLINE ALL" / "Submit All Preferences")
+# yang kadang menutupi tombol Log In. `:has-text()` Playwright case-insensitive.
 DO_CONSENT_SELECTORS = [
+    # TrustArc
     "#truste-consent-button",
     'button:has-text("Agree & Proceed")',
+    # OneTrust (umum di DigitalOcean)
+    "#onetrust-accept-btn-handler",
+    ".onetrust-accept-btn-handler",
+    "#accept-recommended-btn-handler",
+    "#onetrust-reject-all-handler",
+    ".onetrust-close-btn-handler",
+    'button[aria-label="Accept All"]',
+    'button[aria-label="Accept all cookies"]',
+    # Berbasis teks (sesuai modal di screenshot)
+    'button:has-text("Accept All")',
+    'button:has-text("Decline All")',
+    'button:has-text("Submit All Preferences")',
+    'button:has-text("Accept Cookies")',
+    'button:has-text("Allow all")',
 ]
 
 # DigitalOcean "Authenticate with GitHub"  [dari screenshot]
@@ -752,12 +770,46 @@ async def _open_do_offer(page, context) -> Tuple[Optional[object], Optional[str]
 # ------------------------------------------------------------------
 
 
-async def _dismiss_do_consent(page) -> None:
-    """Klik 'Agree & Proceed' pada banner cookie DO bila muncul (no-op jika tidak)."""
-    try:
-        await _try_click(page, DO_CONSENT_SELECTORS, timeout=3_000)
-    except Exception:
-        pass
+async def _dismiss_do_consent(page) -> bool:
+    """Tutup banner / modal cookie-consent DigitalOcean bila muncul.
+
+    Menangani beberapa varian (TrustArc & modal preferensi cookie bergaya
+    OneTrust dengan tombol 'ACCEPT ALL' / 'DECLINE ALL'). Modal ini kadang
+    menutupi tombol Log In sehingga klik gagal. Pencarian dilakukan di main
+    frame maupun semua iframe, dengan beberapa kali percobaan karena banner
+    bisa muncul terlambat. Aman dipanggil walau tidak ada banner (no-op).
+
+    Return True bila ada banner yang berhasil ditutup.
+    """
+    dismissed = False
+    for _ in range(3):
+        clicked = False
+        # Banner/modal consent sering berada di dalam iframe → telusuri semua frame.
+        try:
+            frames = list(page.frames)
+        except Exception:
+            frames = []
+        for frame in frames:
+            for sel in DO_CONSENT_SELECTORS:
+                try:
+                    loc = frame.locator(sel).first
+                    if await loc.is_visible(timeout=800):
+                        await loc.click(timeout=2_000)
+                        clicked = True
+                        dismissed = True
+                        logger.info(
+                            "[DO Claimer] Banner cookie DigitalOcean ditutup via '%s'.",
+                            sel,
+                        )
+                        await asyncio.sleep(1)
+                        break
+                except Exception:
+                    continue
+            if clicked:
+                break
+        if not clicked:
+            break  # tidak ada (lagi) banner yang terlihat
+    return dismissed
 
 
 # ------------------------------------------------------------------
@@ -807,12 +859,19 @@ async def _login_do_if_needed(
             "Field password DigitalOcean tidak ditemukan.",
             await _safe_screenshot(page),
         )
+
+    # Banner cookie bisa muncul terlambat dan menutupi tombol Log In sehingga
+    # klik gagal ("Tombol Log In tidak ditemukan"). Tutup dulu sebelum submit,
+    # lalu coba lagi sekali bila klik pertama gagal.
+    await _dismiss_do_consent(page)
     if not await _try_click(page, DO_LOGIN_SUBMIT_SELECTORS):
-        return ClaimResult(
-            False,
-            "Tombol Log In DigitalOcean tidak ditemukan.",
-            await _safe_screenshot(page),
-        )
+        await _dismiss_do_consent(page)
+        if not await _try_click(page, DO_LOGIN_SUBMIT_SELECTORS):
+            return ClaimResult(
+                False,
+                "Tombol Log In DigitalOcean tidak ditemukan.",
+                await _safe_screenshot(page),
+            )
 
     await asyncio.sleep(4)
 
@@ -890,6 +949,8 @@ async def _complete_oauth_authorize(page, context) -> Optional[ClaimResult]:
     page_txt = await _page_text(page)
     if "authenticate with github" in page_txt:
         logger.info("[DO Claimer] Halaman 'Authenticate with GitHub' terdeteksi.")
+        # Banner cookie DO bisa juga menutupi tombol di halaman ini.
+        await _dismiss_do_consent(page)
         await _try_click(page, DO_AUTH_GITHUB_SELECTORS, timeout=8_000)
         await asyncio.sleep(4)
 
